@@ -1,132 +1,84 @@
+import sys
+import json
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType
-import json
-import time
-import traceback
+from pyspark.sql.types import StructType, StructField, DoubleType, StringType, ArrayType
 from kafka import KafkaProducer
+from sklearn.linear_model import LinearRegression
+import numpy as np
 
-def main():
-    try:
-        print("🚀 Démarrage de Fog Node 2...")
-        
-        # 1. إنشاء Spark Session
-        spark = SparkSession.builder \
-            .appName("FogNode-2") \
-            .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0") \
-            .config("spark.sql.streaming.checkpointLocation", "/tmp/checkpoint_node2") \
-            .getOrCreate()
-        
-        print("✅ Spark Session créée")
-        
-        # 2. تعريف مخطط البيانات
-        schema = StructType([
-            StructField("node_id", StringType()),
-            StructField("timestamp", StringType()),
-            StructField("temperature", DoubleType()),
-            StructField("vibration", DoubleType()),
-            StructField("pressure", DoubleType()),
-            StructField("anomaly", DoubleType())
-        ])
-        
-        # 3. Kafka Producer
-        print("🔌 Tentative de connexion à Kafka...")
-        try:
-            kafka_producer = KafkaProducer(
-                bootstrap_servers=['localhost:9092'],
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
-            )
-            print("✅ Connexion au Kafka Producer")
-        except Exception as e:
-            print(f"❌ Échec de la connexion à Kafka: {e}")
-            spark.stop()
-            return
-        
-        # 4. قراءة البيانات من Kafka
-        print("📖 Lecture du topic sensor-data-node-2...")
-        df = spark \
-            .readStream \
-            .format("kafka") \
-            .option("kafka.bootstrap.servers", "localhost:9092") \
-            .option("subscribe", "sensor-data-node-2") \
-            .option("startingOffsets", "earliest") \
-            .option("failOnDataLoss", "false") \
-            .load()
-        
-        # 5. تحويل JSON
-        parsed_df = df.select(
-            from_json(col("value").cast("string"), schema).alias("data")
-        ).select("data.*")
-        
-        # 6. دالة المعالجة
-        def process_batch(batch_df, batch_id):
-            try:
-                count = batch_df.count()
-                print(f"\n{'='*50}")
-                print(f"🔧 Fog Node 2 - Batch {batch_id}")
-                print(f"   Échantillons: {count}")
-                
-                if count > 0:
-                    # حساب المتوسطات
-                    avg_temp = batch_df.selectExpr("avg(temperature)").first()[0]
-                    avg_vibration = batch_df.selectExpr("avg(vibration)").first()[0]
-                    
-                    # أوزان محاكاة
-                    weights = [avg_temp, avg_vibration, 0.5]
-                    
-                    # رسالة الأوزان
-                    weights_msg = {
-                        "node_id": "node-2",
-                        "batch_id": int(batch_id),
-                        "weights": weights,
-                        "intercept": 1.0,
-                        "num_samples": int(count),
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "type": "node_update"
-                    }
-                    
-                    # إرسال إلى model-weights
-                    kafka_producer.send("model-weights", value=weights_msg)
-                    kafka_producer.flush()
-                    
-                    print("📤 Poids envoyés → model-weights")
-                    print(f"   Poids: {[round(w, 2) for w in weights]}")
-                else:
-                    print("⚠️ Pas de données dans ce batch")
-                
-                print(f"{'='*50}")
-                
-            except Exception as e:
-                print(f"❌ Erreur dans process_batch: {e}")
-                traceback.print_exc()
-        
-        # 7. بدء المعالجة
-        print("🎬 Démarrage du Streaming Query...")
-        
-        query = parsed_df \
-            .writeStream \
-            .foreachBatch(process_batch) \
-            .trigger(processingTime='10 seconds') \
-            .option("checkpointLocation", "/tmp/checkpoint_fog_node_2") \
-            .start()
-        
-        print("✅ Fog Node 2 fonctionne et attend les données...")
-        print("   Appuyez sur Ctrl+C pour arrêter\n")
-        
-        # انتظار حتى الإنهاء
-        query.awaitTermination()
-        
-    except KeyboardInterrupt:
-        print("\n⏹️ Fog Node 2 arrêté par l'utilisateur")
-    except Exception as e:
-        print(f"\n❌ Erreur principale : {e}")
-        traceback.print_exc()
-    finally:
-        print("\n🧹 Nettoyage des ressources...")
-        try:
-            spark.stop()
-        except:
-            pass
+# إعدادات العقدة (يمكنك تغييرها عند التشغيل للعقدة الثانية)
+TOPIC_NAME = "sensor-data-node-2" # غيّر هذا إلى sensor-data-node-2 للعقدة الثانية
+KAFKA_BOOTSTRAP = "localhost:9092"
 
-if __name__ == "__main__":
-    main()
+# إعداد Spark
+spark = SparkSession.builder \
+    .appName("FogNode-Trainer") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0") \
+    .getOrCreate()
+
+spark.sparkContext.setLogLevel("WARN")
+
+# إعداد Producer لإرسال الأوزان
+producer = KafkaProducer(
+    bootstrap_servers=[KAFKA_BOOTSTRAP],
+    value_serializer=lambda x: json.dumps(x).encode('utf-8')
+)
+
+# دالة التدريب التي ستعمل على كل حزمة بيانات (Micro-batch)
+def train_and_send_weights(batch_df, batch_id):
+    if batch_df.count() == 0:
+        return
+    
+    # تحويل بيانات Spark إلى Pandas للتدريب السريع
+    pdf = batch_df.toPandas()
+    
+    # تجهيز البيانات للتدريب
+    # ملاحظة: الميزات تأتي كمصفوفة، نحتاج لتسطيحها
+    X = np.array(pdf['features'].tolist())
+    y = np.array(pdf['label'].tolist())
+    
+    # تدريب نموذج محلي (Scikit-Learn أسرع للحزم الصغيرة)
+    model = LinearRegression()
+    model.fit(X, y)
+    
+    # استخراج الأوزان
+    weights = {
+        'node_id': pdf['node_id'].iloc[0],
+        'batch_id': batch_id,
+        'coef': model.coef_[0],     # الميل (Slope)
+        'intercept': model.intercept_ # التقاطع (Bias)
+    }
+    
+    # إرسال الأوزان إلى السحابة
+    print(f"📦 Sending Weights from Batch {batch_id}: {weights}")
+    producer.send('model-weights', value=weights)
+    producer.flush()
+
+# تعريف Schema للبيانات القادمة JSON
+schema = StructType([
+    StructField("node_id", StringType()),
+    StructField("features", ArrayType(DoubleType())),
+    StructField("label", DoubleType())
+])
+
+# 1. القراءة من Kafka
+df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP) \
+    .option("subscribe", TOPIC_NAME) \
+    .option("startingOffsets", "latest") \
+    .load()
+
+# 2. فك تشفير البيانات
+parsed_df = df.selectExpr("CAST(value AS STRING)") \
+    .select(from_json(col("value"), schema).alias("data")) \
+    .select("data.*")
+
+# 3. تشغيل الـ Stream وتطبيق دالة التدريب
+query = parsed_df.writeStream \
+    .foreachBatch(train_and_send_weights) \
+    .trigger(processingTime='5 seconds') \
+    .start()
+
+query.awaitTermination()
