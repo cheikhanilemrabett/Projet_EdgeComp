@@ -1,0 +1,1 @@
+[{"round": 1, "accuracy": 0.6144281096906051, "participating_nodes": ["Agency_1", "Agency_2"], "timestamp": 1770502238897}, {"round": 2, "accuracy": 0.61489686065229, "participating_nodes": ["Agency_3", "Agency_1"], "timestamp": 1770502792379}, {"round": 3, "accuracy": 0.6148017342815209, "participating_nodes": ["Agency_3", "Agency_2"], "timestamp": 1770502814486}]

@@ -1,122 +1,91 @@
 import streamlit as st
-import json
 import pandas as pd
-from kafka import KafkaConsumer
-import matplotlib.pyplot as plt
+import json
 import time
+import os
+import plotly.express as px
 
-# --- إعدادات الصفحة ---
-st.set_page_config(
-    page_title="IoT Federated Learning Monitor",
-    layout="wide",
-    page_icon="☁️"
-)
+# إعداد الصفحة
+st.set_page_config(page_title="Système de Détection de Fraude", layout="wide")
 
-st.title("☁️ Cloud Aggregator & Live Monitoring")
-st.markdown("---")
+st.title("🏦 Tableau de Bord : Apprentissage Fédéré")
+st.markdown("Surveillance de la fraude bancaire en temps réel - (Projet 3.3)")
 
-# --- تهيئة المتغيرات (Session State) ---
-# نحتاج لتخزين البيانات في الذاكرة لكي لا تختفي عند تحديث الصفحة
-if 'data_history' not in st.session_state:
-    st.session_state['data_history'] = []
+# اسم الملف (يجب أن يكون مطابقاً لملف السيرفر)
+HISTORY_FILE = 'historique_modele_global.json'
 
-# --- إعداد Kafka Consumer ---
-# نستخدم @st.cache_resource لكي لا يعيد الاتصال بـ Kafka مع كل تحديث للصفحة
-@st.cache_resource
-def init_consumer():
-    return KafkaConsumer(
-        'model-weights',
-        bootstrap_servers=['localhost:9092'],
-        auto_offset_reset='earliest',  # اقرأ البيانات القديمة أولاً
-        enable_auto_commit=True,
-        group_id='dashboard-group-v2', # تغيير الجروب لضمان قراءة كل شيء من جديد
-        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-    )
+def load_data():
+    """وظيفة لتحميل البيانات من ملف JSON"""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, 'r') as f:
+            content = f.read()
+            if not content:
+                return []
+            return json.loads(content)
+    except Exception:
+        return []
 
-consumer = init_consumer()
+# تحميل البيانات
+data = load_data()
 
-# --- تخطيط الصفحة (Layout) ---
-# ننشئ أماكن فارغة (Placeholders) سنقوم بتحديثها لاحقاً
-col1, col2 = st.columns([1, 2])
+if not data:
+    # رسالة تنبيه في حال عدم وجود بيانات
+    st.warning("⏳ En attente de mises à jour des nœuds (Agencies)...")
+    # إعادة المحاولة بعد 3 ثواني
+    time.sleep(3)
+    st.rerun()
+else:
+    df = pd.DataFrame(data)
+    latest = df.iloc[-1]
 
-with col1:
-    st.subheader("📊 Global Model Metrics")
-    metrics_placeholder = st.empty()
-    logs_placeholder = st.empty()
-
-with col2:
-    st.subheader("📈 Weights Convergence")
-    chart_placeholder = st.empty()
-
-# --- حلقة التحديث الرئيسية ---
-st.toast("Listening for Spark updates...", icon="📡")
-
-# زر لإيقاف المراقبة يدوياً
-stop_button = st.button("Stop Monitoring")
-
-while not stop_button:
-    # 1. محاولة سحب رسائل جديدة (لمدة 0.5 ثانية فقط)
-    # هذا هو السر: poll لا تجمد الشاشة للأبد مثل for loop
-    msg_pack = consumer.poll(timeout_ms=500)
-
-    # 2. إذا وجدنا رسائل، نضيفها للقائمة
-    if msg_pack:
-        for tp, messages in msg_pack.items():
-            for message in messages:
-                data = message.value
-                st.session_state['data_history'].append(data)
+    # --- القسم الأول: المؤشرات الرئيسية (KPIs) ---
+    col1, col2, col3 = st.columns(3)
     
-    # 3. معالجة البيانات وعرضها (إذا كانت القائمة غير فارغة)
-    if len(st.session_state['data_history']) > 0:
-        df = pd.DataFrame(st.session_state['data_history'])
+    with col1:
+        st.metric(label="Round Actuel", value=f"#{latest['round']}")
+    
+    with col2:
+        # عرض الدقة كنسبة مئوية
+        accuracy_val = f"{latest['accuracy']:.2%}"
+        st.metric(label="Précision Globale", value=accuracy_val)
+    
+    with col3:
+        # حساب عدد الوكالات المشاركة
+        nodes_count = len(latest['participating_nodes'])
+        st.metric(label="Agencies Participantes", value=nodes_count)
+
+    st.divider()
+
+    # --- القسم الثاني: الرسم البياني وتطور الدقة ---
+    col_chart, col_table = st.columns([2, 1])
+
+    with col_chart:
+        st.subheader("📈 Évolution de la Précision")
+        fig = px.line(
+            df, 
+            x='round', 
+            y='accuracy', 
+            markers=True,
+            title="Précision du Modèle Global par Round",
+            labels={'round': 'Round', 'accuracy': 'Précision'}
+        )
+        fig.update_yaxes(range=[0, 1.0])
         
-        # --- الحسابات (Federated Averaging) ---
-        # نأخذ آخر 20 تحديثاً لنكون أكثر دقة
-        recent_df = df.tail(20)
-        global_coef = recent_df['coef'].mean()
-        global_intercept = recent_df['intercept'].mean()
-        total_updates = len(df)
-        last_node = df.iloc[-1]['node_id']
+        # حل مشكلة الـ ID: إضافة مفتاح فريد يعتمد على عدد السجلات
+        st.plotly_chart(fig, use_container_width=True, key=f"plot_round_{len(df)}")
 
-        # --- تحديث الأرقام (Metrics) ---
-        with metrics_placeholder.container():
-            kpi1, kpi2 = st.columns(2)
-            kpi1.metric("Global Slope (Weights)", f"{global_coef:.4f}")
-            kpi2.metric("Global Bias (Intercept)", f"{global_intercept:.4f}")
-            st.info(f"Last update from: **{last_node}** | Total Packets: {total_updates}")
-            st.success(f"Final Model Equation:\n\n $y = {global_coef:.2f}x + {global_intercept:.2f}$")
+    with col_table:
+        # --- القسم الثالث: سجل التحديثات الأخير ---
+        st.subheader("📋 Dernières Mises à Jour")
+        recent_df = df[['round', 'accuracy']].sort_values(by='round', ascending=False)
+        st.table(recent_df.head(5))
 
-        # --- تحديث الرسم البياني ---
-        with chart_placeholder.container():
-            fig, ax = plt.subplots(figsize=(8, 4))
-            
-            # رسم نقاط كل عقدة بلون مختلف
-            groups = recent_df.groupby('node_id')
-            for name, group in groups:
-                ax.plot(group.index, group['coef'], marker='o', linestyle='', label=name, alpha=0.6)
-            
-            # رسم الخط المتوسط (Global Model)
-            ax.axhline(y=global_coef, color='red', linestyle='--', linewidth=2, label='Global Model')
-            
-            ax.set_title("Live Weight Updates (FedAvg)")
-            ax.set_ylabel("Coefficient Value")
-            ax.set_xlabel("Update Sequence")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            
-            st.pyplot(fig)
-            plt.close(fig) # تنظيف الذاكرة
+    # --- القسم الرابع: تفاصيل العقد المشاركة ---
+    with st.expander("Voir les détails des nœuds par round"):
+        st.dataframe(df[['round', 'participating_nodes', 'timestamp']], use_container_width=True)
 
-        # --- عرض السجلات ---
-        with logs_placeholder.container():
-            st.write("Recent Raw Data:")
-            st.dataframe(recent_df[['node_id', 'batch_id', 'coef', 'intercept']].tail(5), hide_index=True)
-
-    else:
-        # شاشة انتظار إذا لم تصل بيانات بعد
-        with metrics_placeholder.container():
-            st.warning("Waiting for data from Kafka...")
-
-    # 4. توقف لحظي لتخفيف الحمل على المعالج
-    time.sleep(1) 
-    # لا نحتاج st.rerun هنا لأننا نستخدم while loop وتحديث الـ Placeholders
+    # تحديث تلقائي للصفحة كل 5 ثوانٍ
+    time.sleep(5)
+    st.rerun()
