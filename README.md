@@ -71,4 +71,14 @@ Le système repose sur trois couches logiques :
     # Agence 2
     python edge_node.py 2
         
+## 📊 Résultats
+Métrique,Valeur,Description
+Précision Globale,61.48%,Après agrégation des connaissances de 3 agences.
+Confidentialité,100%,Aucune fuite de données (Data Leakage).
+Résilience,Haute,Le système continue de fonctionner même avec une agence déconnectée.
 
+
+## ✍️ Auteurs
+   Cheikhani (C20114)
+
+Master 2 - IA (Mchine Learning & Science des Données)
