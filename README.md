@@ -25,7 +25,6 @@
   - [Cloud Layer (Le Cerveau)](#3-cloud-layer-le-cerveau-)
 - [🚀 Installation et Utilisation](#-installation-et-utilisation)
 - [📊 Résultats](#-résultats)
-- [✍️ Auteurs](#️-auteurs)
 
 ---
 
@@ -141,18 +140,6 @@ python edge_node.py 3
 | **Résilience** | `Haute` | ✅ Fonctionne même avec une agence déconnectée |
 
 </div>
-
----
-
-## ✍️ Auteurs
-
-<div align="center">
-
-**Cheikhani (C20114)**
-
-*Master 2 - IA (Machine Learning & Science des Données)*
-
----
 
 
 
